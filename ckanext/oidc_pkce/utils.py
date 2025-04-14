@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import jwt
 import logging
+import requests
 import secrets
+from jwt.algorithms import RSAAlgorithm
 from typing import Any, Optional
 
 import ckan.plugins.toolkit as tk
@@ -15,9 +18,11 @@ from .interfaces import IOidcPkce
 
 log = logging.getLogger(__name__)
 
+AUTH0_DOMAIN = 'dev-bc.au.auth0.com'
+API_AUDIENCE = 'https://dev-bc.au.auth0.com/api/v2/'
 DEFAULT_LENGTH = 64
+JWKS_URL = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
 SESSION_USER = "ckanext:oidc-pkce:username"
-
 
 def code_verifier(n_bytes: int = DEFAULT_LENGTH) -> str:
     """Generate PKCE verifier"""
@@ -57,3 +62,36 @@ def login(user: model.User):
         login_user(user)
     else:
         session[SESSION_USER] = user.name
+
+def get_jwks():
+    """
+    Fetch the JSON Web Key Set (JWKS) from Auth0 to validate JWTs.
+    """
+    response = requests.get(JWKS_URL)
+    response.raise_for_status()
+    return response.json()
+
+def get_signing_key(token):
+    """
+    Extract the appropriate public key from JWKS based on token header 'kid'.
+    """
+    unverified_header = jwt.get_unverified_header(token)
+    jwks = get_jwks()
+    for key in jwks['keys']:
+        if key['kid'] == unverified_header['kid']:
+            return RSAAlgorithm.from_jwk(key)
+    raise Exception('Unable to find signing key for the token')
+
+def decode_access_token(token):
+    """
+    Decode and verify an Auth0 access token using RS256 and JWKS.
+    """
+    key = get_signing_key(token)
+    decoded = jwt.decode(
+        token,
+        key=key,
+        algorithms=['RS256'],
+        audience=API_AUDIENCE,
+        issuer=f'https://{AUTH0_DOMAIN}/'
+    )
+    return decoded

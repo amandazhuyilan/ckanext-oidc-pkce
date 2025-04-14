@@ -117,6 +117,15 @@ def callback():
 
     access_token = exchange["access_token"]
 
+    # Decode the access token
+    decoded_token = {}
+    if access_token:
+        try:
+            decoded_token = utils.decode_access_token(access_token)
+            log.info(f"Decoded access token: {decoded_token}")
+        except Exception as e:
+            log.error(f"Failed to decode access token: {e}")
+
     # Authorization flow successful, get userinfo and login user
     userinfo = requests.get(
         config.userinfo_url(),
