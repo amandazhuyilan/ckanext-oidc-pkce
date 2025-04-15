@@ -1,3 +1,2 @@
 pyjwt
-cryptography
 requests
