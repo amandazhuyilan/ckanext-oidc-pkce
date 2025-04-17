@@ -8,6 +8,7 @@ import requests
 import secrets
 from jwt.algorithms import RSAAlgorithm
 from typing import Any, Optional
+import json
 
 import ckan.plugins.toolkit as tk
 from ckan import model
@@ -18,18 +19,20 @@ from .interfaces import IOidcPkce
 
 log = logging.getLogger(__name__)
 
-AUTH0_DOMAIN = 'dev-bc.au.auth0.com'
-API_AUDIENCE = 'https://dev-bc.au.auth0.com/api/v2/'
+AUTH0_DOMAIN = "login.test.biocommons.org.au"
+API_AUDIENCE = "v82EoLw0NzR5GXcdHgLMVL9urGIbZQHH"
 DEFAULT_LENGTH = 64
 JWKS_URL = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
+ROLE_CLAIM = "https://biocommons.org.au/roles"
+ROLE_PREFIX = "BPA/"
 SESSION_USER = "ckanext:oidc-pkce:username"
+
 
 def code_verifier(n_bytes: int = DEFAULT_LENGTH) -> str:
     """Generate PKCE verifier"""
     valid_range = range(31, 97)
     if n_bytes not in valid_range:
-        raise ValueError(f"Verifier too short. n_bytes must in {valid_range}")
-
+        raise ValueError(f"Verifier too short. n_bytes must be in {valid_range}")
     return secrets.token_urlsafe(n_bytes)
 
 
@@ -58,40 +61,80 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 def login(user: model.User):
     if tk.check_ckan_version("2.10"):
         from ckan.common import login_user
-
         login_user(user)
     else:
         session[SESSION_USER] = user.name
 
+
 def get_jwks():
-    """
-    Fetch the JSON Web Key Set (JWKS) from Auth0 to validate JWTs.
-    """
+    """Fetch the JSON Web Key Set (JWKS) from Auth0 to validate JWTs."""
     response = requests.get(JWKS_URL)
     response.raise_for_status()
     return response.json()
 
+
 def get_signing_key(token):
-    """
-    Extract the appropriate public key from JWKS based on token header 'kid'.
-    """
     unverified_header = jwt.get_unverified_header(token)
     jwks = get_jwks()
     for key in jwks['keys']:
-        if key['kid'] == unverified_header['kid']:
-            return RSAAlgorithm.from_jwk(key)
+        if key['kid'] == unverified_header['kid']:  # ✅ this is the correct line
+            return RSAAlgorithm.from_jwk(json.dumps(key))
     raise Exception('Unable to find signing key for the token')
 
 def decode_access_token(token):
     """
-    Decode and verify an Auth0 access token using RS256 and JWKS.
+    Decode and verify a JWT token using RS256 and JWKS.
     """
-    key = get_signing_key(token)
-    decoded = jwt.decode(
-        token,
-        key=key,
-        algorithms=['RS256'],
-        audience=API_AUDIENCE,
-        issuer=f'https://{AUTH0_DOMAIN}/'
-    )
-    return decoded
+    if isinstance(token, dict):
+        log.warning("Token is already a dict — skipping JWT decode")
+        return token
+
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+
+    try:
+        # Decode without verification first to inspect
+        unverified = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+    except Exception as e:
+        log.error(f"Failed to decode JWT without verification: {e}")
+        return {}
+
+    try:
+        key = get_signing_key(token)
+        log.debug("Successfully resolved signing key for JWT.")
+
+        decoded = jwt.decode(
+            token,
+            key=key,
+            algorithms=["RS256"],
+            audience=API_AUDIENCE,
+            issuer=f"https://{AUTH0_DOMAIN}/",
+        )
+        log.info(f"Verified decoded JWT claims: {decoded}")
+        return decoded
+    except Exception as e:
+        log.error(f"JWT decoding failed: {e}")
+        return {}
+
+def get_roles_from_token(access_token: dict[str, Any]) -> List[str]:
+    """
+    Extract and return role names from a decoded JWT access token.
+
+    Only includes roles starting with ROLE_PREFIX.
+
+    Args:
+        access_token: The decoded Auth0 token (id_token or access_token)
+
+    Returns:
+        A list of role strings (filtered by prefix)
+    """
+    if not access_token:
+        log.warning("No access token provided for role extraction")
+        return []
+
+    raw_roles = access_token.get(ROLE_CLAIM, [])
+    log.debug(f"Raw roles in token: {raw_roles}")
+
+    token_roles = [role for role in raw_roles if role.lower().startswith(ROLE_PREFIX)]
+    log.info(f"Filtered roles from token: {token_roles}")
+    return token_roles

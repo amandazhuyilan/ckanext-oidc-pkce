@@ -1,2 +1,3 @@
-pyjwt
+pyjwt<=1.7.1
 requests
+cryptography

@@ -5,7 +5,7 @@ import logging
 from urllib.parse import urlencode
 
 import requests
-from flask import Blueprint
+from flask import Blueprint, redirect
 
 import ckan.plugins.toolkit as tk
 from ckan.common import session
@@ -25,7 +25,6 @@ bp = Blueprint("oidc_pkce", __name__)
 
 
 def get_blueprints():
-
     return [bp]
 
 
@@ -48,12 +47,8 @@ def login():
         "response_mode": "query",
     }
 
-    url = "{base_url}?{query_params}".format(
-        base_url=config.auth_url(), query_params=urlencode(params)
-    )
-
-    resp = tk.redirect_to(url)
-
+    url = f"{config.auth_url()}?{urlencode(params)}"
+    resp = redirect(url)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
@@ -61,17 +56,13 @@ def login():
 
 
 def callback():
-    # TODO: check state
     error = tk.request.args.get("error")
     state = tk.request.args.get("state")
     code = tk.request.args.get("code")
 
     verifier = session.pop(SESSION_VERIFIER, None)
     session_state = session.pop(SESSION_STATE, None)
-    came_from = (
-        config.error_redirect()
-        or tk.url_for("user.login")
-    )
+    came_from = config.error_redirect() or tk.url_for("user.login")
 
     if not error:
         if not verifier:
@@ -93,8 +84,8 @@ def callback():
     }
 
     if config.client_secret():
-        auth_header: str = config.client_id() + ":" + config.client_secret()
-        headers["Authorization"] = "Basic " + base64.b64encode(auth_header.encode('ascii')).decode('ascii')
+        auth_header = f"{config.client_id()}:{config.client_secret()}"
+        headers["Authorization"] = "Basic " + base64.b64encode(auth_header.encode("ascii")).decode("ascii")
 
     data = {
         "grant_type": "authorization_code",
@@ -104,29 +95,36 @@ def callback():
         "code_verifier": verifier,
     }
 
-    exchange = requests.post(
-        config.token_url(), headers=headers, data=data
-    ).json()
+    exchange = requests.post(config.token_url(), headers=headers, data=data).json()
 
-    # Get tokens and validate
+    log.debug(f"Token exchange keys: {list(exchange.keys())}")
+    log.debug(f"access_token (start): {exchange.get('access_token', '')[:80]}")
+    log.debug(f"id_token (start): {exchange.get('id_token', '')[:80]}")
+
     if not exchange.get("token_type"):
         error = "Unsupported token type. Should be 'Bearer'."
         log.error("Error: %s", error)
         session[SESSION_ERROR] = error
         return tk.redirect_to(came_from)
 
-    access_token = exchange["access_token"]
+    access_token = exchange.get("access_token")
+    id_token = exchange.get("id_token")
 
-    # Decode the access token
     decoded_token = {}
-    if access_token:
+    if id_token:
         try:
-            decoded_token = utils.decode_access_token(access_token)
-            log.info(f"Decoded access token: {decoded_token}")
-        except Exception as e:
-            log.error(f"Failed to decode access token: {e}")
+            decoded_token = utils.decode_access_token(id_token)
+            log.info(f"Decoded ID token: {decoded_token}")
 
-    # Authorization flow successful, get userinfo and login user
+            # Extract and log user roles from the decoded token
+            user_roles = utils.get_roles_from_token(decoded_token)
+            log.info(f"User roles from token: {user_roles}")
+        except Exception as e:
+            log.error(f"JWT decoding failed: {e}")
+    else:
+        log.warning("No id_token found in exchange. Skipping decode.")
+
+    # Use access_token to get userinfo (as required by OIDC)
     userinfo = requests.get(
         config.userinfo_url(),
         headers={"Authorization": f"Bearer {access_token}"},
@@ -148,10 +146,7 @@ def callback():
     utils.login(user)
 
     came_from = session.pop(SESSION_CAME_FROM, None)
-
-    return tk.redirect_to(
-        came_from or tk.config.get("ckan.route_after_login", "dashboard.index")
-    )
+    return tk.redirect_to(came_from or tk.config.get("ckan.route_after_login", "dashboard.index"))
 
 
 bp.add_url_rule(config.redirect_path(), view_func=callback)
