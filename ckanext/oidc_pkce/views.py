@@ -116,9 +116,6 @@ def callback():
             decoded_token = utils.decode_access_token(id_token)
             log.info(f"Decoded ID token: {decoded_token}")
 
-            # Extract and log user roles from the decoded token
-            user_roles = utils.get_roles_from_token(decoded_token)
-            log.info(f"User roles from token: {user_roles}")
         except Exception as e:
             log.error(f"JWT decoding failed: {e}")
     else:

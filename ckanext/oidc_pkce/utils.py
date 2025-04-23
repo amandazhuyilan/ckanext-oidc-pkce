@@ -47,43 +47,43 @@ def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
 
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     plugin = next(iter(PluginImplementations(IOidcPkce)))
-    log.debug("[OIDC] Synchronize user using plugin: %s", plugin)
+    log.debug("Synchronize user using plugin: %s", plugin)
 
     user = plugin.get_oidc_user(userinfo)
     if not user:
-        log.error("[OIDC] Cannot locate or create user using: %s", userinfo)
+        log.error("Cannot locate or create user using: %s", userinfo)
         return
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
     token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
-    log.info(f"[OIDC] User '{user.name}' roles from token: {token_roles}")
+    log.info(f"User '{user.name}' roles from token: {token_roles}")
 
     # Load role-to-org-role mapping from config
     try:
         role_map_raw = tk.config.get("ckanext.oidc_pkce.role_org_map", "{}")
         role_map = json.loads(role_map_raw)
-        log.debug(f"[OIDC] Loaded role mapping: {role_map}")
+        log.debug(f"Loaded role mapping: {role_map}")
     except Exception as e:
-        log.error("[OIDC] Failed to parse 'role_org_map': %s", e)
+        log.error("Failed to parse 'role_org_map': %s", e)
         return user
 
     for role in token_roles:
         mapped_value = role_map.get(role)
         if not mapped_value:
-            log.debug(f"[OIDC] Role '{role}' not mapped in config.")
+            log.debug(f"Role '{role}' not mapped in config.")
             continue
 
         if mapped_value == "__sysadmin__":
             if user_obj and not user_obj.sysadmin:
                 user_obj.sysadmin = True
                 model.Session.commit()
-                log.info(f"[OIDC] Granted sysadmin to '{user.name}' via role '{role}'")
+                log.info(f"Granted sysadmin to '{user.name}' via role '{role}'")
             continue
 
         if ":" not in mapped_value:
-            log.warning(f"[OIDC] Invalid format for mapping '{mapped_value}', skipping.")
+            log.warning(f"Invalid format for mapping '{mapped_value}', skipping.")
             continue
 
         org_name, ckan_role = mapped_value.split(":", 1)
@@ -94,9 +94,9 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
         except tk.ObjectNotFound:
             try:
                 tk.get_action("organization_create")(context, {"name": org_name, "title": org_name})
-                log.info(f"[OIDC] Created org '{org_name}' for role '{role}'")
+                log.info(f"Created org '{org_name}' for role '{role}'")
             except Exception as e:
-                log.error(f"[OIDC] Failed to create org '{org_name}': {e}")
+                log.error(f"Failed to create org '{org_name}': {e}")
                 continue
 
         # Assign user to organization
@@ -105,11 +105,11 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
                 context,
                 {"id": org_name, "username": user.name, "role": ckan_role}
             )
-            log.info(f"[OIDC] Assigned '{user.name}' as '{ckan_role}' in '{org_name}' via role '{role}'")
+            log.info(f"Assigned '{user.name}' as '{ckan_role}' in '{org_name}' via role '{role}'")
         except tk.ValidationError:
-            log.debug(f"[OIDC] '{user.name}' already has role in '{org_name}'")
+            log.debug(f"'{user.name}' already has role in '{org_name}'")
         except Exception as e:
-            log.error(f"[OIDC] Error assigning role in '{org_name}' for '{user.name}': {e}")
+            log.error(f"Error assigning role in '{org_name}' for '{user.name}': {e}")
 
     return user
 
