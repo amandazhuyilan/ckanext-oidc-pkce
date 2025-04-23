@@ -24,7 +24,6 @@ API_AUDIENCE = "v82EoLw0NzR5GXcdHgLMVL9urGIbZQHH"
 DEFAULT_LENGTH = 64
 JWKS_URL = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
 ROLE_CLAIM = "https://biocommons.org.au/roles"
-ROLE_PREFIX = "BPA/"
 SESSION_USER = "ckanext:oidc-pkce:username"
 
 
@@ -47,7 +46,7 @@ def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
 
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     plugin = next(iter(PluginImplementations(IOidcPkce)))
-    log.debug("Synchronize user using plugin: %s", plugin)
+    log.info("Synchronize user using plugin: %s", plugin)
 
     user = plugin.get_oidc_user(userinfo)
     if not user:
@@ -62,20 +61,24 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     # Load role-to-org-role mapping from config
     try:
+        config_path = getattr(tk.config, '_config_filepath', 'UNKNOWN')
+        log.info(f"Reading role mapping from config file: {config_path}")
+
         role_map_raw = tk.config.get("ckanext.oidc_pkce.role_org_map", "{}")
         role_map = json.loads(role_map_raw)
+
         if role_map:
-            log.debug(f"[OIDC] Loaded role mapping: {role_map}")
+            log.info(f"Loaded role mapping: {role_map}")
         else:
-            log.debug(f"role mapping empty!")
+            log.info(f"Role map is empty. Check 'ckanext.oidc_pkce.role_org_map' in {config_path}")
     except Exception as e:
-        log.error("Failed to parse 'role_org_map': %s", e)
+        log.error(f"Failed to parse 'role_org_map' from {config_path}: {e}")
         return user
 
     for role in token_roles:
         mapped_value = role_map.get(role)
         if not mapped_value:
-            log.debug(f"Role '{role}' not mapped in config.")
+            log.info(f"Role '{role}' not mapped in config.")
             continue
 
         if mapped_value == "__sysadmin__":
@@ -86,7 +89,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
             continue
 
         if ":" not in mapped_value:
-            log.warning(f"Invalid format for mapping '{mapped_value}', skipping.")
+            log.info(f"Invalid format for mapping '{mapped_value}', skipping.")
             continue
 
         org_name, ckan_role = mapped_value.split(":", 1)
@@ -110,7 +113,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
             )
             log.info(f"Assigned '{user.name}' as '{ckan_role}' in '{org_name}' via role '{role}'")
         except tk.ValidationError:
-            log.debug(f"'{user.name}' already has role in '{org_name}'")
+            log.info(f"'{user.name}' already has role in '{org_name}'")
         except Exception as e:
             log.error(f"Error assigning role in '{org_name}' for '{user.name}': {e}")
 
@@ -144,7 +147,7 @@ def decode_access_token(token):
     Decode and verify a JWT token using RS256 and JWKS.
     """
     if isinstance(token, dict):
-        log.warning("Token is already a dict — skipping JWT decode")
+        log.info("Token is already a dict — skipping JWT decode")
         return token
 
     if isinstance(token, bytes):
@@ -159,7 +162,7 @@ def decode_access_token(token):
 
     try:
         key = get_signing_key(token)
-        log.debug("Successfully resolved signing key for JWT.")
+        log.info("Successfully resolved signing key for JWT.")
 
         decoded = jwt.decode(
             token,
@@ -173,26 +176,3 @@ def decode_access_token(token):
     except Exception as e:
         log.error(f"JWT decoding failed: {e}")
         return {}
-
-def get_roles_from_token(access_token: dict[str, Any]) -> List[str]:
-    """
-    Extract and return role names from a decoded JWT access token.
-
-    Only includes roles starting with ROLE_PREFIX.
-
-    Args:
-        access_token: The decoded Auth0 token (id_token or access_token)
-
-    Returns:
-        A list of role strings (filtered by prefix)
-    """
-    if not access_token:
-        log.warning("No access token provided for role extraction")
-        return []
-
-    raw_roles = access_token.get(ROLE_CLAIM, [])
-    log.debug(f"Raw roles in token: {raw_roles}")
-
-    token_roles = [role for role in raw_roles if role.lower().startswith(ROLE_PREFIX)]
-    log.info(f"Filtered roles from token: {token_roles}")
-    return token_roles
