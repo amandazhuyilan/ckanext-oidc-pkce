@@ -64,7 +64,10 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     try:
         role_map_raw = tk.config.get("ckanext.oidc_pkce.role_org_map", "{}")
         role_map = json.loads(role_map_raw)
-        log.debug(f"Loaded role mapping: {role_map}")
+        if role_map:
+            log.debug(f"[OIDC] Loaded role mapping: {role_map}")
+        else:
+            log.debug(f"role mapping empty!")
     except Exception as e:
         log.error("Failed to parse 'role_org_map': %s", e)
         return user
