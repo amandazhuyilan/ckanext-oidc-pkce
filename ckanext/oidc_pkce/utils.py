@@ -16,6 +16,7 @@ from ckan.common import session
 from ckan.plugins import PluginImplementations
 
 from .interfaces import IOidcPkce
+import re
 
 log = logging.getLogger(__name__)
 
@@ -59,63 +60,72 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     log.info(f"User '{user.name}' roles from token: {token_roles}")
 
-    # Load role-to-org-role mapping from config
-    try:
-        config_path = getattr(tk.config, '_config_filepath', 'UNKNOWN')
-        log.info(f"Reading role mapping from config file: {config_path}")
-
-        role_map_raw = tk.config.get("ckanext.oidc_pkce.role_org_map", "{}")
-        role_map = json.loads(role_map_raw)
-
-        if role_map:
-            log.info(f"Loaded role mapping: {role_map}")
-        else:
-            log.info(f"Role map is empty. Check 'ckanext.oidc_pkce.role_org_map' in {config_path}")
-    except Exception as e:
-        log.error(f"Failed to parse 'role_org_map' from {config_path}: {e}")
+    if not token_roles:
+        log.warning("No roles found in userinfo token for user '%s'", user.name)
         return user
 
     for role in token_roles:
-        mapped_value = role_map.get(role)
-        if not mapped_value:
-            log.info(f"Role '{role}' not mapped in config.")
-            continue
-
-        if mapped_value == "__sysadmin__":
+        if role == "BPA/SysAdmin":
             if user_obj and not user_obj.sysadmin:
                 user_obj.sysadmin = True
                 model.Session.commit()
-                log.info(f"Granted sysadmin to '{user.name}' via role '{role}'")
+                log.info(f"Granted sysadmin to '{user.name}' via BPA/SysAdmin")
             continue
 
-        if ":" not in mapped_value:
-            log.info(f"Invalid format for mapping '{mapped_value}', skipping.")
+        match = re.match(r"BPA/Org/(?P<org>[\w\-\.]+):(?P<ckan_role>\w+)", role)
+        if not match:
+            log.warning(f"Role '{role}' does not match expected pattern 'BPA/Org/<org-name>:<role-name>'")
             continue
 
-        org_name, ckan_role = mapped_value.split(":", 1)
+        org_name = match.group("org").lower()
+        ckan_role = match.group("ckan_role").lower()
 
-        # Ensure org exists
+        log.debug(f"Parsed Auth0 role '{role}' -> org: '{org_name}', role: '{ckan_role}'")
+
+        # Validate organization exists
         try:
             tk.get_action("organization_show")(context, {"id": org_name})
         except tk.ObjectNotFound:
-            try:
-                tk.get_action("organization_create")(context, {"name": org_name, "title": org_name})
-                log.info(f"Created org '{org_name}' for role '{role}'")
-            except Exception as e:
-                log.error(f"Failed to create org '{org_name}': {e}")
-                continue
+            log.error(f"[OIDC] Organization '{org_name}' does not exist. Cannot assign role '{ckan_role}' for user '{user.name}'.")
+            continue
+        except Exception as e:
+            log.error(f"[OIDC] Error checking existence of organization '{org_name}': {e}")
+            continue
 
-        # Assign user to organization
+        # Validate role is known
+        if ckan_role not in {"admin", "editor", "member"}:
+            log.warning(f"[OIDC] Invalid CKAN role '{ckan_role}' parsed from '{role}' — skipping.")
+            continue
+
         try:
+            # Check existing membership
+            existing_roles = tk.get_action("organization_member_list")(
+                context, {"id": org_name, "object_type": "user"}
+            )
+            user_roles = [r for r in existing_roles if r['name'] == user.name]
+
+            if user_roles:
+                current_role = user_roles[0]['capacity']
+                log.debug(f"[OIDC] User '{user.name}' already has role '{current_role}' in org '{org_name}'")
+
+                if current_role == 'admin':
+                    log.info(f"[OIDC] '{user.name}' is already admin in '{org_name}', skipping downgrade to '{ckan_role}'")
+                    continue
+                if current_role == ckan_role:
+                    log.info(f"[OIDC] '{user.name}' already has correct role '{ckan_role}' in '{org_name}', skipping.")
+                    continue
+
+            # Assign new role if needed
             tk.get_action("organization_member_create")(
                 context,
                 {"id": org_name, "username": user.name, "role": ckan_role}
             )
-            log.info(f"Assigned '{user.name}' as '{ckan_role}' in '{org_name}' via role '{role}'")
-        except tk.ValidationError:
-            log.info(f"'{user.name}' already has role in '{org_name}'")
+            log.info(f"Assigned '{user.name}' as '{ckan_role}' in org '{org_name}' via role '{role}'")
+
+        except tk.ValidationError as ve:
+            log.debug(f"Validation error while assigning '{user.name}' in '{org_name}': {ve}")
         except Exception as e:
-            log.error(f"Error assigning role in '{org_name}' for '{user.name}': {e}")
+            log.error(f"[OIDC] Error assigning user '{user.name}' to '{org_name}': {e}")
 
     return user
 
