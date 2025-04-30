@@ -10,6 +10,7 @@ from flask import Blueprint, redirect
 import ckan.plugins.toolkit as tk
 from ckan.common import session
 from ckan.plugins import PluginImplementations
+from ckan.plugins.toolkit import h, redirect_to
 
 from . import config, utils
 from .interfaces import IOidcPkce
@@ -127,7 +128,11 @@ def callback():
         headers={"Authorization": f"Bearer {access_token}"},
     ).json()
 
-    user = utils.sync_user(userinfo)
+    try:
+        user = utils.sync_user(userinfo)
+    except tk.NotAuthorized as e:
+        h.flash_error(str(e))
+        return redirect_to('home')  # Or create a custom /unauthorized route
     if not user:
         error = "Unique user not found"
         log.error("Error: %s", error)

@@ -47,85 +47,71 @@ def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
 
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     plugin = next(iter(PluginImplementations(IOidcPkce)))
-    log.info("Synchronize user using plugin: %s", plugin)
+    log.debug("[OIDC] Synchronize user using plugin: %s", plugin)
 
     user = plugin.get_oidc_user(userinfo)
     if not user:
-        log.error("Cannot locate or create user using: %s", userinfo)
-        return
+        raise tk.NotAuthorized("Unable to identify or create a CKAN user from your identity provider.")
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
     token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
-    log.info(f"User '{user.name}' roles from token: {token_roles}")
-
     if not token_roles:
-        log.warning("No roles found in userinfo token for user '%s'", user.name)
-        return user
+        raise tk.NotAuthorized("No roles were provided by your identity provider. You cannot proceed.")
 
     for role in token_roles:
         if role == "BPA/SysAdmin":
             if user_obj and not user_obj.sysadmin:
                 user_obj.sysadmin = True
                 model.Session.commit()
-                log.info(f"Granted sysadmin to '{user.name}' via BPA/SysAdmin")
             continue
 
         match = re.match(r"BPA/Org/(?P<org>[\w\-\.]+):(?P<ckan_role>\w+)", role)
         if not match:
-            log.warning(f"Role '{role}' does not match expected pattern 'BPA/Org/<org-name>:<role-name>'")
-            continue
+            raise tk.NotAuthorized(f"The role '{role}' is not in a recognized format. Please contact an administrator.")
 
         org_name = match.group("org").lower()
         ckan_role = match.group("ckan_role").lower()
-
-        log.debug(f"Parsed Auth0 role '{role}' -> org: '{org_name}', role: '{ckan_role}'")
 
         # Validate organization exists
         try:
             tk.get_action("organization_show")(context, {"id": org_name})
         except tk.ObjectNotFound:
-            log.error(f"[OIDC] Organization '{org_name}' does not exist. Cannot assign role '{ckan_role}' for user '{user.name}'.")
-            continue
-        except Exception as e:
-            log.error(f"[OIDC] Error checking existence of organization '{org_name}': {e}")
-            continue
+            raise tk.NotAuthorized(f"The organization '{org_name}' does not exist in BPA Data Portal. Please contact an administrator.")
 
-        # Validate role is known
+        # Validate CKAN role
         if ckan_role not in {"admin", "editor", "member"}:
-            log.warning(f"[OIDC] Invalid CKAN role '{ckan_role}' parsed from '{role}' — skipping.")
-            continue
+            raise tk.NotAuthorized(f"The CKAN role '{ckan_role}' is not valid. Allowed roles: admin, editor, member.")
 
         try:
-            # Check existing membership
-            existing_roles = tk.get_action("organization_member_list")(
+            existing_roles = tk.get_action("member_list")(
                 context, {"id": org_name, "object_type": "user"}
             )
-            user_roles = [r for r in existing_roles if r['name'] == user.name]
+            user_roles = [r for r in existing_roles if r[0] == user.name]
 
             if user_roles:
-                current_role = user_roles[0]['capacity']
-                log.debug(f"[OIDC] User '{user.name}' already has role '{current_role}' in org '{org_name}'")
-
+                current_role = user_roles[0][2]
                 if current_role == 'admin':
-                    log.info(f"[OIDC] '{user.name}' is already admin in '{org_name}', skipping downgrade to '{ckan_role}'")
-                    continue
+                    continue  # Don't downgrade
                 if current_role == ckan_role:
-                    log.info(f"[OIDC] '{user.name}' already has correct role '{ckan_role}' in '{org_name}', skipping.")
-                    continue
+                    continue  # Already correct
 
-            # Assign new role if needed
             tk.get_action("organization_member_create")(
                 context,
                 {"id": org_name, "username": user.name, "role": ckan_role}
             )
-            log.info(f"Assigned '{user.name}' as '{ckan_role}' in org '{org_name}' via role '{role}'")
 
-        except tk.ValidationError as ve:
-            log.debug(f"Validation error while assigning '{user.name}' in '{org_name}': {ve}")
+        except tk.NotAuthorized as e:
+            raise tk.NotAuthorized(
+                f"You are not authorized to update your membership in '{org_name}'. "
+                "Please contact an administrator of the target organization."
+            ) from e
+
         except Exception as e:
-            log.error(f"[OIDC] Error assigning user '{user.name}' to '{org_name}': {e}")
+            raise tk.NotAuthorized(
+                f"An unexpected error occurred when processing your role for '{org_name}': {e}"
+            ) from e
 
     return user
 
