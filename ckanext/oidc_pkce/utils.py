@@ -57,15 +57,6 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
 
-    # Email verification check
-    email_verified = userinfo.get("email_verified", False)
-    if not email_verified:
-        raise tk.NotAuthorized("Your email address is not verified. Please verify before accessing BioPlatforms Data Portal.")
-
-    token_roles = userinfo.get("https://biocommons.org.au/roles", [])
-    log.info(f"[OIDC] User '{user.name}' email verified: {email_verified}")
-    log.info(f"[OIDC] Roles from token: {token_roles}")
-
     # If no roles, still allow login
     if not token_roles:
         log.info(f"[OIDC] No role claims for '{user.name}', proceeding without org assignments.")
