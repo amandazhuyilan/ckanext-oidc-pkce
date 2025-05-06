@@ -46,6 +46,7 @@ def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
     return secrets.token_urlsafe(n_bytes)
 
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
+    """Main entry point for user sync on login."""
     plugin = next(iter(PluginImplementations(IOidcPkce)))
     log.debug("[OIDC] Synchronize user using plugin: %s", plugin)
 
@@ -55,65 +56,96 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
-    token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
+    # Email verification check
+    email_verified = userinfo.get("email_verified", False)
+    if not email_verified:
+        raise tk.NotAuthorized("Your email address is not verified. Please verify before accessing BioPlatforms Data Portal.")
+
+    token_roles = userinfo.get("https://biocommons.org.au/roles", [])
+    log.info(f"[OIDC] User '{user.name}' email verified: {email_verified}")
+    log.info(f"[OIDC] Roles from token: {token_roles}")
+
+    # If no roles, still allow login
     if not token_roles:
-        raise tk.NotAuthorized("No roles were provided by your identity provider. You cannot proceed.")
+        log.info(f"[OIDC] No role claims for '{user.name}', proceeding without org assignments.")
+        return user
 
     for role in token_roles:
         if role == "BPA/SysAdmin":
-            if user_obj and not user_obj.sysadmin:
-                user_obj.sysadmin = True
-                model.Session.commit()
+            promote_to_sysadmin(user_obj)
             continue
 
-        match = re.match(r"BPA/Org/(?P<org>[\w\-\.]+):(?P<ckan_role>\w+)", role)
-        if not match:
-            raise tk.NotAuthorized(f"The role '{role}' is not in a recognized format. Please contact an administrator.")
+        parsed = parse_org_role(role)
+        if not parsed:
+            log.debug(f"[OIDC] Skipping unrecognized role format: '{role}'")
+            continue
 
-        org_name = match.group("org").lower()
-        ckan_role = match.group("ckan_role").lower()
+        org_name, ckan_role = parsed
+        if not validate_ckan_role(ckan_role):
+            log.warning(f"[OIDC] Skipping invalid CKAN role: '{ckan_role}'")
+            continue
 
-        # Validate organization exists
-        try:
-            tk.get_action("organization_show")(context, {"id": org_name})
-        except tk.ObjectNotFound:
-            raise tk.NotAuthorized(f"The organization '{org_name}' does not exist in BPA Data Portal. Please contact an administrator.")
+        if not organization_exists(org_name, context):
+            log.warning(f"[OIDC] Organization '{org_name}' not found. Skipping role assignment.")
+            continue
 
-        # Validate CKAN role
-        if ckan_role not in {"admin", "editor", "member"}:
-            raise tk.NotAuthorized(f"The CKAN role '{ckan_role}' is not valid. Allowed roles: admin, editor, member.")
-
-        try:
-            existing_roles = tk.get_action("member_list")(
-                context, {"id": org_name, "object_type": "user"}
-            )
-            user_roles = [r for r in existing_roles if r[0] == user.name]
-
-            if user_roles:
-                current_role = user_roles[0][2]
-                if current_role == 'admin':
-                    continue  # Don't downgrade
-                if current_role == ckan_role:
-                    continue  # Already correct
-
-            tk.get_action("organization_member_create")(
-                context,
-                {"id": org_name, "username": user.name, "role": ckan_role}
-            )
-
-        except tk.NotAuthorized as e:
-            raise tk.NotAuthorized(
-                f"You are not authorized to update your membership in '{org_name}'. "
-                "Please contact an administrator of the target organization."
-            ) from e
-
-        except Exception as e:
-            raise tk.NotAuthorized(
-                f"An unexpected error occurred when processing your role for '{org_name}': {e}"
-            ) from e
+        assign_role_in_organization(user.name, org_name, ckan_role, context)
 
     return user
+
+def promote_to_sysadmin(user_obj: model.User):
+    if user_obj and not user_obj.sysadmin:
+        user_obj.sysadmin = True
+        model.Session.commit()
+        log.info(f"[OIDC] Granted sysadmin privileges to user '{user_obj.name}'")
+
+
+def parse_org_role(role: str) -> Optional[tuple[str, str]]:
+    match = re.match(r"BPA/Org/(?P<org>[\w\-\.]+):(?P<ckan_role>\w+)", role)
+    if match:
+        return match.group("org").lower(), match.group("ckan_role").lower()
+    return None
+
+
+def validate_ckan_role(ckan_role: str) -> bool:
+    return ckan_role in {"admin", "editor", "member"}
+
+
+def organization_exists(org_name: str, context: dict) -> bool:
+    try:
+        tk.get_action("organization_show")(context, {"id": org_name})
+        return True
+    except tk.ObjectNotFound:
+        return False
+
+
+def assign_role_in_organization(username: str, org_name: str, ckan_role: str, context: dict):
+    try:
+        existing_roles = tk.get_action("member_list")(
+            context, {"id": org_name, "object_type": "user"}
+        )
+        user_roles = [r for r in existing_roles if r[0] == username]
+
+        if user_roles:
+            current_role = user_roles[0][2]
+            if current_role == "admin":
+                log.debug(f"[OIDC] '{username}' is already admin in '{org_name}', skipping downgrade.")
+                return
+            if current_role == ckan_role:
+                log.debug(f"[OIDC] '{username}' already has correct role '{ckan_role}' in '{org_name}', skipping.")
+                return
+
+        tk.get_action("organization_member_create")(
+            context,
+            {"id": org_name, "username": username, "role": ckan_role}
+        )
+        log.info(f"[OIDC] Assigned '{username}' as '{ckan_role}' in '{org_name}'")
+
+    except tk.NotAuthorized as e:
+        log.warning(f"[OIDC] Not authorized to assign user '{username}' in '{org_name}': {e}")
+    except Exception as e:
+        log.error(f"[OIDC] Unexpected error assigning user '{username}' to '{org_name}': {e}")
 
 def login(user: model.User):
     if tk.check_ckan_version("2.10"):
