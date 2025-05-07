@@ -56,6 +56,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
+    token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
     # If no roles, still allow login
     if not token_roles:
