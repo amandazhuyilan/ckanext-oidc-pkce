@@ -163,7 +163,7 @@ def get_signing_key(token):
     unverified_header = jwt.get_unverified_header(token)
     jwks = get_jwks()
     for key in jwks['keys']:
-        if key['kid'] == unverified_header['kid']:  # ✅ this is the correct line
+        if key['kid'] == unverified_header['kid']:
             return RSAAlgorithm.from_jwk(json.dumps(key))
     raise Exception('Unable to find signing key for the token')
 

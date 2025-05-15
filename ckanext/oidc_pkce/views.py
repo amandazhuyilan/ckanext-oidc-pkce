@@ -66,7 +66,6 @@ def callback():
     verifier = session.pop(SESSION_VERIFIER, None)
     session_state = session.pop(SESSION_STATE, None)
 
-    # ✅ Always fallback to homepage if error occurs
     fallback_redirect = redirect_to("home.index")
 
     if error:
