@@ -56,28 +56,38 @@ def login():
     return resp
 
 
+@bp.route("/user/login/oidc-pkce/callback")
 def callback():
     error = tk.request.args.get("error")
+    error_description = tk.request.args.get("error_description")
     state = tk.request.args.get("state")
     code = tk.request.args.get("code")
 
     verifier = session.pop(SESSION_VERIFIER, None)
     session_state = session.pop(SESSION_STATE, None)
-    came_from = config.error_redirect() or tk.url_for("user.login")
 
-    if not error:
-        if not verifier:
-            error = "Login process was not started properly"
-        elif not code:
-            error = "The code was not returned or is not accessible"
-        elif state != session_state:
-            error = "The app state does not match"
+    # ✅ Always fallback to homepage if error occurs
+    fallback_redirect = redirect_to("home.index")
 
     if error:
-        log.error(f"Error: {error}")
-        session[SESSION_ERROR] = error
-        return tk.redirect_to(came_from)
+        msg = error_description or "OIDC login was denied."
+        log.error(f"[OIDC] Error during callback: {error} - {msg}")
+        h.flash_error(msg)
+        return fallback_redirect
 
+    if not verifier:
+        h.flash_error("Login process was not started properly.")
+        return fallback_redirect
+
+    if not code:
+        h.flash_error("The authorization code was not returned.")
+        return fallback_redirect
+
+    if state != session_state:
+        h.flash_error("The OIDC app state does not match.")
+        return fallback_redirect
+
+    # Exchange code for tokens
     headers = {
         "accept": "application/json",
         "cache-control": "no-cache",
@@ -103,10 +113,9 @@ def callback():
     log.debug(f"id_token (start): {exchange.get('id_token', '')[:80]}")
 
     if not exchange.get("token_type"):
-        error = "Unsupported token type. Should be 'Bearer'."
-        log.error("Error: %s", error)
-        session[SESSION_ERROR] = error
-        return tk.redirect_to(came_from)
+        log.error("Unsupported token type or failed exchange.")
+        h.flash_error("Authentication failed. Please try again later.")
+        return fallback_redirect
 
     access_token = exchange.get("access_token")
     id_token = exchange.get("id_token")
@@ -116,13 +125,11 @@ def callback():
         try:
             decoded_token = utils.decode_access_token(id_token)
             log.info(f"Decoded ID token: {decoded_token}")
-
         except Exception as e:
             log.error(f"JWT decoding failed: {e}")
     else:
         log.warning("No id_token found in exchange. Skipping decode.")
 
-    # Use access_token to get userinfo (as required by OIDC)
     userinfo = requests.get(
         config.userinfo_url(),
         headers={"Authorization": f"Bearer {access_token}"},
@@ -132,13 +139,11 @@ def callback():
         user = utils.sync_user(userinfo)
     except tk.NotAuthorized as e:
         h.flash_error(str(e))
-        return redirect_to('home')  # Or create a custom /unauthorized route
+        return fallback_redirect
+
     if not user:
-        error = "Unique user not found"
-        log.error("Error: %s", error)
-        tk.h.flash_error(error)
-        session[SESSION_ERROR] = error
-        return tk.redirect_to(came_from)
+        h.flash_error("Unique user could not be resolved.")
+        return fallback_redirect
 
     for plugin in PluginImplementations(IOidcPkce):
         resp = plugin.oidc_login_response(user)
