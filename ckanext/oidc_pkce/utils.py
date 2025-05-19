@@ -199,7 +199,7 @@ def decode_access_token(token):
         log.info(" Successfully resolved signing key for JWT.")
 
         decoded = jwt.decode(
-            token,oi
+            token,
             key=key,
             algorithms=["RS256"],
             audience=API_AUDIENCE,
