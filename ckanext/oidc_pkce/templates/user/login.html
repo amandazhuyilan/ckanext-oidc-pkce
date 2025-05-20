@@ -10,5 +10,8 @@ Adds a link from the login form to the single sign-on provider.
 
 {% block help_register_button %}
     {{ super() }}
-    <a href="{{ h.url_for('user.login') }}/oidc-pkce" class="btn btn-secondary">Register via single sign-on</a>
+    <a href="https://aaiportal.test.biocommons.org.au/bpa/register" class="btn btn-secondary">
+        Register
+    </a>
 {% endblock %}
+

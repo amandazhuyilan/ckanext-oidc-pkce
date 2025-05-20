@@ -153,5 +153,8 @@ def callback():
     came_from = session.pop(SESSION_CAME_FROM, None)
     return tk.redirect_to(came_from or tk.config.get("ckan.route_after_login", "dashboard.index"))
 
+@bp.route("/user/register")
+def force_oidc_register():
+    return redirect("https://aaiportal.test.biocommons.org.au/bpa/register")
 
 bp.add_url_rule(config.redirect_path(), view_func=callback)
