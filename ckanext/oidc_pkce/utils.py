@@ -14,6 +14,7 @@ import ckan.plugins.toolkit as tk
 from ckan import model
 from ckan.common import session
 from ckan.plugins import PluginImplementations
+from ckan.plugins.toolkit import h, redirect_to
 
 from .interfaces import IOidcPkce
 import re
@@ -48,7 +49,7 @@ def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     """Main entry point for user sync on login."""
     plugin = next(iter(PluginImplementations(IOidcPkce)))
-    log.debug("[OIDC] Synchronize user using plugin: %s", plugin)
+    log.debug("Synchronize user using plugin: %s", plugin)
 
     user = plugin.get_oidc_user(userinfo)
     if not user:
@@ -58,9 +59,13 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     context = {"user": user.name}
     token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
+    redirect = ensure_verified_email(userinfo, user.name)
+    if redirect:
+        return redirect
+
     # If no roles, still allow login
     if not token_roles:
-        log.info(f"[OIDC] No role claims for '{user.name}', proceeding without org assignments.")
+        log.info(f"No role claims for '{user.name}', proceeding without org assignments.")
         return user
 
     for role in token_roles:
@@ -70,16 +75,16 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
         parsed = parse_org_role(role)
         if not parsed:
-            log.debug(f"[OIDC] Skipping unrecognized role format: '{role}'")
+            log.debug(f"Skipping unrecognized role format: '{role}'")
             continue
 
         org_name, ckan_role = parsed
         if not validate_ckan_role(ckan_role):
-            log.warning(f"[OIDC] Skipping invalid CKAN role: '{ckan_role}'")
+            log.warning(f"Skipping invalid CKAN role: '{ckan_role}'")
             continue
 
         if not organization_exists(org_name, context):
-            log.warning(f"[OIDC] Organization '{org_name}' not found. Skipping role assignment.")
+            log.warning(f"Organization '{org_name}' not found. Skipping role assignment.")
             continue
 
         assign_role_in_organization(user.name, org_name, ckan_role, context)
@@ -90,7 +95,7 @@ def promote_to_sysadmin(user_obj: model.User):
     if user_obj and not user_obj.sysadmin:
         user_obj.sysadmin = True
         model.Session.commit()
-        log.info(f"[OIDC] Granted sysadmin privileges to user '{user_obj.name}'")
+        log.info(f"Granted sysadmin privileges to user '{user_obj.name}'")
 
 
 def parse_org_role(role: str) -> Optional[tuple[str, str]]:
@@ -101,7 +106,7 @@ def parse_org_role(role: str) -> Optional[tuple[str, str]]:
 
 
 def validate_ckan_role(ckan_role: str) -> bool:
-    return ckan_role in {"admin", "editor", "member"}
+    return ckan_role in {"admin", "member"}
 
 
 def organization_exists(org_name: str, context: dict) -> bool:
@@ -122,22 +127,22 @@ def assign_role_in_organization(username: str, org_name: str, ckan_role: str, co
         if user_roles:
             current_role = user_roles[0][2]
             if current_role == "admin":
-                log.debug(f"[OIDC] '{username}' is already admin in '{org_name}', skipping downgrade.")
+                log.debug(f"'{username}' is already admin in '{org_name}', skipping downgrade.")
                 return
             if current_role == ckan_role:
-                log.debug(f"[OIDC] '{username}' already has correct role '{ckan_role}' in '{org_name}', skipping.")
+                log.debug(f"'{username}' already has correct role '{ckan_role}' in '{org_name}', skipping.")
                 return
 
         tk.get_action("organization_member_create")(
             context,
             {"id": org_name, "username": username, "role": ckan_role}
         )
-        log.info(f"[OIDC] Assigned '{username}' as '{ckan_role}' in '{org_name}'")
+        log.info(f"Assigned '{username}' as '{ckan_role}' in '{org_name}'")
 
     except tk.NotAuthorized as e:
-        log.warning(f"[OIDC] Not authorized to assign user '{username}' in '{org_name}': {e}")
+        log.warning(f"Not authorized to assign user '{username}' in '{org_name}': {e}")
     except Exception as e:
-        log.error(f"[OIDC] Unexpected error assigning user '{username}' to '{org_name}': {e}")
+        log.error(f"Unexpected error assigning user '{username}' to '{org_name}': {e}")
 
 def login(user: model.User):
     if tk.check_ckan_version("2.10"):
@@ -158,16 +163,25 @@ def get_signing_key(token):
     unverified_header = jwt.get_unverified_header(token)
     jwks = get_jwks()
     for key in jwks['keys']:
-        if key['kid'] == unverified_header['kid']:  # ✅ this is the correct line
+        if key['kid'] == unverified_header['kid']:
             return RSAAlgorithm.from_jwk(json.dumps(key))
     raise Exception('Unable to find signing key for the token')
+
+def ensure_verified_email(userinfo: dict[str, Any], username: str):
+    """Check if the user's email is verified. If not, show a UI error and redirect."""
+    email_verified = userinfo.get("email_verified", False)
+    if not email_verified:
+        msg = "Your email address is not verified. Please check your inbox, confirm your email address and sign in again."
+        log.warning(f"Blocking login for unverified user '{username}'")
+        h.flash_error(msg)
+        return redirect_to("home.index")
 
 def decode_access_token(token):
     """
     Decode and verify a JWT token using RS256 and JWKS.
     """
     if isinstance(token, dict):
-        log.info("Token is already a dict — skipping JWT decode")
+        log.info(" Token is already a dict — skipping JWT decode")
         return token
 
     if isinstance(token, bytes):
@@ -177,12 +191,12 @@ def decode_access_token(token):
         # Decode without verification first to inspect
         unverified = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
     except Exception as e:
-        log.error(f"Failed to decode JWT without verification: {e}")
+        log.error(f" Failed to decode JWT without verification: {e}")
         return {}
 
     try:
         key = get_signing_key(token)
-        log.info("Successfully resolved signing key for JWT.")
+        log.info(" Successfully resolved signing key for JWT.")
 
         decoded = jwt.decode(
             token,
