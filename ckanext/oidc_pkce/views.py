@@ -55,10 +55,6 @@ def login():
     resp.headers["Expires"] = "0"
     return resp
 
-@bp.route("/user/login")
-def force_oidc_login():
-    return redirect_to("oidc_pkce.login")
-
 @bp.route("/user/login/oidc-pkce/callback")
 def callback():
     error = tk.request.args.get("error")
