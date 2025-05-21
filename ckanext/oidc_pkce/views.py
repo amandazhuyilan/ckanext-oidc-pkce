@@ -157,4 +157,8 @@ def callback():
 def force_oidc_register():
     return redirect("https://aaiportal.test.biocommons.org.au/bpa/register")
 
+@bp.route("/user/login")
+def force_oidc_login():
+    return tk.redirect_to("oidc_pkce.login")
+
 bp.add_url_rule(config.redirect_path(), view_func=callback)
