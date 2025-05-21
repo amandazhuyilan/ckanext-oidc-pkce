@@ -46,8 +46,8 @@ def code_challenge(verifier: str) -> str:
 def app_state(n_bytes: int = DEFAULT_LENGTH) -> str:
     return secrets.token_urlsafe(n_bytes)
 
+
 def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
-    """Main entry point for user sync on login."""
     plugin = next(iter(PluginImplementations(IOidcPkce)))
     log.debug("Synchronize user using plugin: %s", plugin)
 
@@ -57,39 +57,45 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
-    token_roles = userinfo.get("https://biocommons.org.au/roles", [])
 
     redirect = ensure_verified_email(userinfo, user.name)
     if redirect:
         return redirect
 
-    # If no roles, still allow login
-    if not token_roles:
-        log.info(f"No role claims for '{user.name}', proceeding without org assignments.")
-        return user
+    token_roles = userinfo.get(ROLE_CLAIM, [])
+    app_metadata = userinfo.get("app_metadata", {})
+    services = app_metadata.get("services", [])
 
-    for role in token_roles:
-        if role == "BPA/SysAdmin":
-            promote_to_sysadmin(user_obj)
-            continue
+    # First assign roles from tokens
+    if token_roles:
+        for role in token_roles:
+            if role == "BPA/SysAdmin":
+                promote_to_sysadmin(user_obj)
+                continue
 
-        parsed = parse_org_role(role)
-        if not parsed:
-            log.debug(f"Skipping unrecognized role format: '{role}'")
-            continue
+            parsed = parse_org_role(role)
+            if not parsed:
+                log.debug(f"Skipping unrecognized role format: '{role}'")
+                continue
 
-        org_name, ckan_role = parsed
-        if not validate_ckan_role(ckan_role):
-            log.warning(f"Skipping invalid CKAN role: '{ckan_role}'")
-            continue
+            org_name, ckan_role = parsed
+            if not validate_ckan_role(ckan_role):
+                log.warning(f"Skipping invalid CKAN role: '{ckan_role}'")
+                continue
 
-        if not organization_exists(org_name, context):
-            log.warning(f"Organization '{org_name}' not found. Skipping role assignment.")
-            continue
+            if not organization_exists(org_name, context):
+                log.warning(f"Organization '{org_name}' not found. Skipping role assignment.")
+                continue
 
-        assign_role_in_organization(user.name, org_name, ckan_role, context)
+            assign_role_in_organization(user.name, org_name, ckan_role, context)
+    else:
+        log.info(f"No token-based roles for '{user.name}', proceeding to evaluate resource statuses.")
+
+    # Process services and resource statuses
+    sync_resource_requests(user.name, services, context)
 
     return user
+
 
 def promote_to_sysadmin(user_obj: model.User):
     if user_obj and not user_obj.sysadmin:
@@ -103,6 +109,45 @@ def parse_org_role(role: str) -> Optional[tuple[str, str]]:
     if match:
         return match.group("org").lower(), match.group("ckan_role").lower()
     return None
+
+
+def register_membership_request(username: str, org_id: str, context: dict[str, Any]):
+    try:
+        tk.get_action("ytp_request_create")(
+            context,
+            {
+                "object_id": org_id,
+                "object_type": "organization",
+                "type": "membership",
+                "message": "Auto-created from Auth0 app_metadata",
+            }
+        )
+        log.info(f"Created pending membership request for '{username}' in '{org_id}'")
+    except tk.ValidationError as e:
+        log.warning(f"Validation error on request creation for '{org_id}': {e}")
+    except Exception as e:
+        log.error(f"Failed to create request for '{org_id}': {e}")
+
+
+def sync_resource_requests(username: str, services: list[dict[str, Any]], context: dict[str, Any]):
+    for service in services:
+        for resource in service.get("resources", []):
+            org_id = resource.get("id")
+            status = resource.get("status")
+
+            if not org_id or not status:
+                continue
+
+            if not organization_exists(org_id, context):
+                log.warning(f"Organization '{org_id}' from app_metadata not found, skipping.")
+                continue
+
+            if status == "approved":
+                assign_role_in_organization(username, org_id, "member", context)
+            elif status == "pending":
+                register_membership_request(username, org_id, context)
+            else:
+                log.info(f"No action taken for org '{org_id}' with status '{status}'")
 
 
 def validate_ckan_role(ckan_role: str) -> bool:
