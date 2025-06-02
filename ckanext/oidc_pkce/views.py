@@ -69,7 +69,7 @@ def callback():
 
     if error:
         msg = error_description or "OIDC login was denied."
-        log.error(f"[OIDC] Error during callback: {error} - {msg}")
+        log.error(f"Error during callback: {error} - {msg}")
         h.flash_error(msg)
         return fallback_redirect
 
@@ -82,7 +82,8 @@ def callback():
         return fallback_redirect
 
     if state != session_state:
-        h.flash_error("The OIDC app state does not match.")
+        log.error(f"The BPA (CKAN) state is: {state}, the OIDC session state is: {session_state}.")
+        h.flash_error("The OIDC app state does not match with the session state from BPA (CKAN).")
         return fallback_redirect
 
     # Exchange code for tokens
@@ -118,11 +119,11 @@ def callback():
     access_token = exchange.get("access_token")
     id_token = exchange.get("id_token")
 
-    decoded_token = {}
+    decoded_id_token = {}
     if id_token:
         try:
-            decoded_token = utils.decode_access_token(id_token)
-            log.info(f"Decoded ID token: {decoded_token}")
+            decoded_id_token = utils.decode_access_token(id_token)
+            log.info(f"Decoded ID token: {decoded_id_token}")
         except Exception as e:
             log.error(f"JWT decoding failed: {e}")
     else:

@@ -63,10 +63,13 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
         return redirect
 
     token_roles = userinfo.get(ROLE_CLAIM, [])
-    app_metadata = userinfo.get("app_metadata", {})
+
+    app_metadata = userinfo.get("https://biocommons.org.au/app_metadata", {})
+    if not app_metadata:
+        log.warning(f"No namespaced app_metadata found in userinfo for {user.name} from Auth0!")
+
     services = app_metadata.get("services", [])
 
-    # First assign roles from tokens
     if token_roles:
         for role in token_roles:
             if role == "BPA/SysAdmin":
@@ -89,10 +92,12 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
             assign_role_in_organization(user.name, org_name, ckan_role, context)
     else:
-        log.info(f"No token-based roles for '{user.name}', proceeding to evaluate resource statuses.")
+        log.info(f"No token-based roles for '{user.name}', evaluating app_metadata services.")
 
-    # Process services and resource statuses
-    sync_resource_requests(user.name, services, context)
+    # Handle pending status without creating requests
+    pending_org_ids = get_pending_orgs_from_services(services, context)
+    session["ckanext:oidc-pkce:pending_org_ids"] = pending_org_ids
+    log.info(f"User '{user.name}' has pending access to: {pending_org_ids}")
 
     return user
 
@@ -112,21 +117,34 @@ def parse_org_role(role: str) -> Optional[tuple[str, str]]:
 
 
 def register_membership_request(username: str, org_id: str, context: dict[str, Any]):
+    """
+    Create a membership request if one does not already exist.
+    """
     try:
-        tk.get_action("ytp_request_create")(
-            context,
-            {
-                "object_id": org_id,
-                "object_type": "organization",
-                "type": "membership",
-                "message": "Auto-created from Auth0 app_metadata",
-            }
-        )
+        existing_requests = tk.get_action("ytp_request_list")(context, {
+            "object_id": org_id,
+            "object_type": "organization",
+            "type": "membership",
+            "user": username,
+            "status": "pending"
+        })
+
+        if existing_requests:
+            log.info(f"Skipping creation — pending request already exists for '{username}' in '{org_id}'.")
+            return
+
+        tk.get_action("ytp_request_create")(context, {
+            "object_id": org_id,
+            "object_type": "organization",
+            "type": "membership",
+            "message": "Auto-created from Auth0 app_metadata",
+        })
         log.info(f"Created pending membership request for '{username}' in '{org_id}'")
+
     except tk.ValidationError as e:
-        log.warning(f"Validation error on request creation for '{org_id}': {e}")
+        log.warning(f"[OIDC] Validation error on request creation for '{org_id}': {e}")
     except Exception as e:
-        log.error(f"Failed to create request for '{org_id}': {e}")
+        log.error(f"[OIDC] Failed to create request for '{org_id}': {e}")
 
 
 def sync_resource_requests(username: str, services: list[dict[str, Any]], context: dict[str, Any]):
@@ -189,6 +207,7 @@ def assign_role_in_organization(username: str, org_name: str, ckan_role: str, co
     except Exception as e:
         log.error(f"Unexpected error assigning user '{username}' to '{org_name}': {e}")
 
+
 def login(user: model.User):
     if tk.check_ckan_version("2.10"):
         from ckan.common import login_user
@@ -212,6 +231,7 @@ def get_signing_key(token):
             return RSAAlgorithm.from_jwk(json.dumps(key))
     raise Exception('Unable to find signing key for the token')
 
+
 def ensure_verified_email(userinfo: dict[str, Any], username: str):
     """Check if the user's email is verified. If not, show a UI error and redirect."""
     email_verified = userinfo.get("email_verified", False)
@@ -220,6 +240,7 @@ def ensure_verified_email(userinfo: dict[str, Any], username: str):
         log.warning(f"Blocking login for unverified user '{username}'")
         h.flash_error(msg)
         return redirect_to("home.index")
+
 
 def decode_access_token(token):
     """
@@ -255,3 +276,29 @@ def decode_access_token(token):
     except Exception as e:
         log.error(f"JWT decoding failed: {e}")
         return {}
+
+
+def get_pending_orgs_from_services(
+    services: list[dict[str, Any]],
+    context: dict[str, Any]
+) -> list[str]:
+    """
+    Extract and validate pending org IDs from Auth0 app_metadata services block.
+    Only return org IDs marked as 'pending' that exist in CKAN.
+    """
+    pending = []
+
+    for service in services:
+        for resource in service.get("resources", []):
+            org_id = resource.get("id")
+            status = resource.get("status")
+
+            if status != "pending" or not org_id:
+                continue
+
+            if organization_exists(org_id, context):
+                pending.append(org_id)
+            else:
+                log.warning(f"Pending org '{org_id}' from app_metadata not found in BPA, skipping.")
+
+    return pending
