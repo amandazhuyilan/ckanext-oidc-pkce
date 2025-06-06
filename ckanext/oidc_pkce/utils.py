@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import jwt
 import logging
 import requests
 import secrets
 from jwt.algorithms import RSAAlgorithm
 from typing import Any, Optional
-import json
 
 import ckan.plugins.toolkit as tk
 from ckan import model
@@ -53,7 +53,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
 
     user = plugin.get_oidc_user(userinfo)
     if not user:
-        raise tk.NotAuthorized("Unable to identify or create a CKAN user from your identity provider.")
+        raise tk.NotAuthorized("Unable to identify or create a BPA Data Portal user from your identity provider.")
 
     user_obj = model.User.get(user.name)
     context = {"user": user.name}
@@ -62,14 +62,31 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     if redirect:
         return redirect
 
-    token_roles = userinfo.get(ROLE_CLAIM, [])
-
+ 
     app_metadata = userinfo.get("https://biocommons.org.au/app_metadata", {})
     if not app_metadata:
-        log.warning(f"No namespaced app_metadata found in userinfo for {user.name} from Auth0!")
+        log.warning(f"No Auth0 app_metadata found in userinfo for {user.name}!")
+
+
+    user_metadata = userinfo.get("https://biocommons.org.au/user_metadata", {})
+    if not user_metadata:
+        log.warning(f"No Auth0 user_metadata found in userinfo for {user.name}!")
+
+    bpa_data = user_metadata.get("bpa")
+    if not bpa_data:
+        log.warning(f"Missing 'bpa' field in user_metadata for userinfo: {userinfo}")
+    else:
+        username = bpa_data.get("username")
+        if username:
+            user.extras["bpa"] = json.dumps({"username": username})
+            log.info(f"Stored bpa.username='{username}' in user.extras for user '{user.name}'")
+        else:
+            log.warning("Missing 'username' field in 'bpa' metadata")
 
     services = app_metadata.get("services", [])
 
+    # Use roles to manage org membership
+    token_roles = userinfo.get(ROLE_CLAIM, [])
     if token_roles:
         for role in token_roles:
             if role == "BPA/SysAdmin":
@@ -99,6 +116,9 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     session["ckanext:oidc-pkce:pending_org_ids"] = pending_org_ids
     log.info(f"User '{user.name}' has pending access to: {pending_org_ids}")
 
+    # flush changes for extras
+    model.Session.add(user_obj)
+    model.Session.commit()
     return user
 
 
@@ -165,7 +185,7 @@ def sync_resource_requests(username: str, services: list[dict[str, Any]], contex
             elif status == "pending":
                 register_membership_request(username, org_id, context)
             else:
-                log.info(f"No action taken for org '{org_id}' with status '{status}'")
+                log.info(f"No act ion taken for org '{org_id}' with status '{status}'")
 
 
 def validate_ckan_role(ckan_role: str) -> bool:
