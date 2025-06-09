@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+import re
 
 from flask import redirect
 from flask.wrappers import Response
 
 import ckan.plugins as p
 import ckan.plugins.toolkit as tk
+
 from ckan import model
 from ckan.common import session
 from ckan.views import user as user_view
@@ -43,32 +45,55 @@ class OidcPkcePlugin(p.SingletonPlugin):
         return views.get_blueprints()
 
     # IConfigurer
-
     def update_config(self, config_):
         tk.add_template_directory(config_, 'templates')
 
     # ITemplateHelpers
-    def get_helpers(
-        self,
-    ):
+    def get_helpers(self):
         return helpers.get_helpers()
 
     # IAuthenticator
+    def get_oidc_user(self, userinfo: dict) -> model.User:
+        sub = userinfo.get("sub")
+        if not sub:
+            raise tk.NotAuthorized("OIDC userinfo missing 'sub' claim.")
+
+        # Extract BPA username from user_metadata
+        user_metadata = userinfo.get("https://biocommons.org.au/user_metadata", {})
+        bpa_username = user_metadata.get("bpa", {}).get("username")
+
+        if not bpa_username:
+            raise tk.NotAuthorized("Missing `bpa.username` in user_metadata")
+
+        if not re.match(r'^[a-z0-9\-_]+$', bpa_username):
+            raise tk.ValidationError(f"Invalid BPA username format: {bpa_username}")
+
+        user = model.User.get(bpa_username)
+
+        if not user:
+            # Create new user
+            user = model.User(
+                name=bpa_username,
+                email=userinfo.get("email"),
+                fullname=userinfo.get("name", bpa_username),
+                password="",  # Not used
+            )
+            model.Session.add(user)
+            model.Session.commit()
+        else:
+            # Update fullname if changed
+            updated_fullname = userinfo.get("name")
+            if updated_fullname and user.fullname != updated_fullname:
+                log.info(f"Updating fullname for '{user.name}' to '{updated_fullname}'")
+                user.fullname = updated_fullname
+                model.Session.commit()
+
+        return user
 
     if tk.check_ckan_version("2.10"):
 
         def logout(self):
-            """ We want to return a view after the regular logout logic,
-            rather than before.
-
-            We set a flag to indicate that we're in the middle of logout,
-            then call the regular logout view. The view calls a second
-            instance of this function, which detects the flag and no-ops,
-            allowing the view to proceed and wipe the session.
-
-            After it completes, we assemble a redirect and pass that back
-            to the code that originally called this function.
-            """
+            """Handle logout with optional SSO redirect."""
             if session.pop("_in_logout", False):
                 log.debug("SSO logout found in-progress flag, skipping recursive call")
                 return None

@@ -78,8 +78,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
     else:
         username = bpa_data.get("username")
         if username:
-            user.extras["bpa"] = json.dumps({"username": username})
-            log.info(f"Stored bpa.username='{username}' in user.extras for user '{user.name}'")
+            log.info(f"bpa.username='{username}' confirmed for user '{user.name}'")
         else:
             log.warning("Missing 'username' field in 'bpa' metadata")
 
