@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 import re
+from typing import Optional
 
 from flask import redirect
 from flask.wrappers import Response

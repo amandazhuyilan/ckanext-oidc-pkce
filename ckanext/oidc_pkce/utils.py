@@ -111,7 +111,7 @@ def sync_user(userinfo: dict[str, Any]) -> Optional[model.User]:
         log.info(f"No token-based roles for '{user.name}', evaluating app_metadata services.")
 
     # Handle pending status without creating requests
-    pending_org_ids = get_pending_orgs_from_services(services, context)
+    pending_org_ids = get_pending_org_metadata_from_services(services, context)
     session["ckanext:oidc-pkce:pending_org_ids"] = pending_org_ids
     log.info(f"User '{user.name}' has pending access to: {pending_org_ids}")
 
@@ -297,27 +297,37 @@ def decode_access_token(token):
         return {}
 
 
-def get_pending_orgs_from_services(
+def get_pending_org_metadata_from_services(
     services: list[dict[str, Any]],
     context: dict[str, Any]
-) -> list[str]:
+) -> list[dict[str, str]]:
     """
-    Extract and validate pending org IDs from Auth0 app_metadata services block.
-    Only return org IDs marked as 'pending' that exist in CKAN.
+    Extract and validate pending org metadata from Auth0 app_metadata.services[].resources[].
+    Returns list of dicts with id, name, status, request_date, handler, etc.
     """
     pending = []
 
     for service in services:
         for resource in service.get("resources", []):
             org_id = resource.get("id")
+            org_name = resource.get("name")
             status = resource.get("status")
 
             if status != "pending" or not org_id:
                 continue
 
-            if organization_exists(org_id, context):
-                pending.append(org_id)
-            else:
-                log.warning(f"Pending org '{org_id}' from app_metadata not found in BPA, skipping.")
+            if not organization_exists(org_id, context):
+                log.warning(f"Pending org '{org_id}' not found in BPA, skipping.")
+                continue
+
+            pending.append({
+                "id": org_id,
+                "name": org_name,
+                "status": status,
+                "request_date": resource.get("last_updated"),
+                "handling_date": resource.get("last_updated"),
+                "handler": resource.get("updated_by")
+            })
 
     return pending
+
