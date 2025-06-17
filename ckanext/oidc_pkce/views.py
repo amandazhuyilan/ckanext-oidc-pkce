@@ -59,11 +59,9 @@ def login():
 def callback():
     error = tk.request.args.get("error")
     error_description = tk.request.args.get("error_description")
-    state = tk.request.args.get("state")
     code = tk.request.args.get("code")
 
     verifier = session.pop(SESSION_VERIFIER, None)
-    session_state = session.pop(SESSION_STATE, None)
 
     fallback_redirect = redirect_to("home.index")
 
@@ -73,17 +71,8 @@ def callback():
         h.flash_error(msg)
         return fallback_redirect
 
-    if not verifier:
-        h.flash_error("Login process was not started properly.")
-        return fallback_redirect
-
     if not code:
         h.flash_error("The authorization code was not returned.")
-        return fallback_redirect
-
-    if state != session_state:
-        log.error(f"The BPA (CKAN) state is: {state}, the OIDC session state is: {session_state}.")
-        h.flash_error("The OIDC app state does not match with the session state from BPA (CKAN).")
         return fallback_redirect
 
     # Exchange code for tokens

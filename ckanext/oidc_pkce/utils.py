@@ -324,7 +324,7 @@ def get_pending_org_metadata_from_services(
                 "id": org_id,
                 "name": org_name,
                 "status": status,
-                "request_date": resource.get("last_updated"),
+                "request_date": resource.get("initial_request_time"),
                 "handling_date": resource.get("last_updated"),
                 "handler": resource.get("updated_by")
             })
