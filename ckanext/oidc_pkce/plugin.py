@@ -80,11 +80,27 @@ class OidcPkcePlugin(p.SingletonPlugin):
             )
             model.Session.add(user)
             model.Session.commit()
+
+            user.plugin_extras = user.plugin_extras or {}
+            user.plugin_extras["oidc_pkce"] = {"auth0_id": sub}
+            model.Session.commit()
+            log.info("Stored Auth0 ID for new user '%s': %s", user.name, sub)
+
         else:
+            extras = user.plugin_extras or {}
+            if "oidc_pkce" not in extras:
+                extras["oidc_pkce"] = {}
+
+            if "auth0_id" not in extras["oidc_pkce"]:
+                extras["oidc_pkce"]["auth0_id"] = sub
+                user.plugin_extras = extras
+                model.Session.commit()
+                log.info("Backfilled Auth0 ID for user '%s': %s", user.name, sub)
+
             # Update fullname if changed
             updated_fullname = userinfo.get("name")
             if updated_fullname and user.fullname != updated_fullname:
-                log.info(f"Updating fullname for '{user.name}' to '{updated_fullname}'")
+                log.info("Updating fullname for '%s' to '%s'", user.name, updated_fullname)
                 user.fullname = updated_fullname
                 model.Session.commit()
 
